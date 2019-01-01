@@ -1,64 +1,105 @@
-# -*- coding: utf-8 -*-
+#-*- coding: UTF-8 -*-
+#!/usr/bin/env python
+#
+# Copyright 2009 Facebook
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you may
+# not use this file except in compliance with the License. You may obtain
+# a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+# WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+# License for the specific language governing permissions and limitations
+# under the License.
 
-import tornado.web
-import tornado.options
-import tornado.ioloop
-import os.path
-from tornado.options import define,options
-import tornado.websocket
+#-*- coding: UTF-8 -*-
+"""Simplified chat demo for websockets.
+
+Authentication, error handling, etc are left as an exercise for the reader :)
+"""
+
 import logging
-from tornado.escape import json_encode
+import tornado.escape
+import tornado.ioloop
+import tornado.options
+import tornado.web
+import tornado.websocket
+import os.path
 import uuid
+import datetime
 
-# 定义启动端口
+from tornado.options import define, options
+
 define("port", default=8888, help="run on the given port", type=int)
 
-# Tornado 应用类
+
 class Application(tornado.web.Application):
-    # URL 映射
     def __init__(self):
         handlers = [
-            (r"/",MainHandler),
+            (r"/", MainHandler),
             (r"/chatsocket", ChatSocketHandler),
         ]
-        # 初始化参数设置
         settings = dict(
-            cookie_secret = "YOU_CANT_GUEST_MY_SECRET",
-            template_path = os.path.join(os.path.dirname(__file__), "templates"),
-            static_path = os.path.join(os.path.dirname(__file__), "static"),
-            xsrf_cookies = True,
+            cookie_secret="__TODO:_GENERATE_YOUR_OWN_RANDOM_VALUE_HERE__",
+            template_path=os.path.join(os.path.dirname(__file__), "templates"),
+            static_path=os.path.join(os.path.dirname(__file__), "static"),
+            xsrf_cookies=True,
         )
+        super(Application, self).__init__(handlers, **settings)
 
-# 主页响应器
-class MainHandler():
+
+class MainHandler(tornado.web.RequestHandler):
     def get(self):
-        self.render("index.html")   # 渲染模板
+        self.render("index.html", messages=ChatSocketHandler.cache, clients=ChatSocketHandler.waiters, username= "游客%d" % ChatSocketHandler.client_id)
 
 class ChatSocketHandler(tornado.websocket.WebSocketHandler):
-    waiters = set()         # 保存所有在线 WebSocket 连接
+    waiters = set()
+    cache = []
+    cache_size = 200
+    client_id = 0
 
-    def open(self):         # WebSocket 建立时调用
+    def get_compression_options(self):
+        # Non-None enables compression with default options.
+        return {}
+
+    def open(self):
+        self.client_id = ChatSocketHandler.client_id
+        ChatSocketHandler.client_id = ChatSocketHandler.client_id + 1
+        self.username = "游客%d" % self.client_id
         ChatSocketHandler.waiters.add(self)
 
-    def on_close(self):     # WebSocket 断开连接后调用
-        ChatSocketHandler.waiters.remove(self)
-
-    def on_message(self, message):      # 收到 WebSocket 消息时调用
-        logging.info("got message %r", message)
-        parsed = tornado.escape.json_decode(message)
-        self.username = parsed["username"]
         chat = {
             "id": str(uuid.uuid4()),
-            "body": parsed["body"],
-            "type": "message",
-        }
-        chat["html"] = tornado.escape.to_basestring(
-            self.render_string("message.html",message=chat)
-        )
+            "type": "online",
+            "client_id": self.client_id,
+            "username": self.username,
+            "datetime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
         ChatSocketHandler.send_updates(chat)
 
+    def on_close(self):
+        ChatSocketHandler.waiters.remove(self)
+        chat = {
+            "id": str(uuid.uuid4()),
+            "type": "offline",
+            "client_id": self.client_id,
+            "username": self.username,
+            "datetime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        ChatSocketHandler.send_updates(chat)
+
+
     @classmethod
-    def send_updates(cls, chat):        # 向所有客户端发送消息
+    def update_cache(cls, chat):
+        cls.cache.append(chat)
+        if len(cls.cache) > cls.cache_size:
+            cls.cache = cls.cache[-cls.cache_size:]
+
+    @classmethod
+    def send_updates(cls, chat):
         logging.info("sending message to %d waiters", len(cls.waiters))
         for waiter in cls.waiters:
             try:
@@ -66,12 +107,31 @@ class ChatSocketHandler(tornado.websocket.WebSocketHandler):
             except:
                 logging.error("Error sending message", exc_info=True)
 
-# 监听端口，并启动IOLoop
+    def on_message(self, message):
+        logging.info("got message %r", message)
+        parsed = tornado.escape.json_decode(message)
+        self.username = parsed["username"]
+        chat = {
+            "id": str(uuid.uuid4()),
+            "body": parsed["body"],
+            "type": "message",
+            "client_id": self.client_id, 
+            "username": self.username,
+            "datetime": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            }
+        chat["html"] = tornado.escape.to_basestring(
+            self.render_string("message.html", message=chat))
+
+        ChatSocketHandler.update_cache(chat)
+        ChatSocketHandler.send_updates(chat)
+
+
 def main():
     tornado.options.parse_command_line()
     app = Application()
     app.listen(options.port)
     tornado.ioloop.IOLoop.current().start()
+
 
 if __name__ == "__main__":
     main()
